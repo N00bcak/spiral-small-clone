@@ -61,7 +61,7 @@ INVALID_ACTION = "[｜INVALID_ACTION｜]"
 
 
 @dataclass
-class SelfPlayArgs(PPOArgs):
+class SelfPlayArgs(PPOArgs): # Despite being called PPOArgs, the default critic is actually à la Dr. GRPO.
     # Environment settings
     env_ids: List[str] = field(default_factory=lambda: ["KuhnPoker-v1"])
     use_llm_obs_wrappers: List[bool] = field(
@@ -76,6 +76,10 @@ class SelfPlayArgs(PPOArgs):
     filter_zero_adv: bool = (
         True  # Make gradient less noisy by filtering zero-gradient trajectories
     )
+
+    '''
+    SPIRAL uses per-player running average (EMA) as the baseline for estimation.
+    '''
     use_role_baseline: bool = True  # Use role baseline for reward shaping
     role_baseline_ema_gamma: float = 0.95
 
