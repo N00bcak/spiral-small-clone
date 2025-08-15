@@ -17,7 +17,17 @@ export LD_LIBRARY_PATH=$(python -c "import sysconfig; print(sysconfig.get_config
 export NCCL_CUMEM_ENABLE=0
 export LP_DEBUG=1
 export LP_LOG_LEVEL=DEBUG
+# export CUDA_DEVICE_ORDER=PCI_BUS_ID
+# export CUDA_VISIBLE_DEVICES=0,1,2,3,5,6,7,8 # GPU 4 is the 4090.
+export CUDA_VISIBLE_DEVICES=0
 export NCCL_DEBUG=INFO  # helps with debugging
+
+# Abstracted batch sizes
+GPUS=1
+ROLLOUT_BATCH_SIZE_PER_DEVICE=8
+TRAIN_BATCH_SIZE_PER_DEVICE=1
+ROLLOUT_BATCH_SIZE=$((GPUS * ROLLOUT_BATCH_SIZE_PER_DEVICE))
+TRAIN_BATCH_SIZE=$((GPUS * TRAIN_BATCH_SIZE_PER_DEVICE))
 
 # Notes ==========
 # Setting `--save_steps 16` to save checkpoints every 16 policy iteration steps.
@@ -27,21 +37,17 @@ export NCCL_DEBUG=INFO  # helps with debugging
 # Beta is the KL Divergence coefficient, set to 0 for no KL penalty.
 # Max length should be set quite generously; it's rare for models to generate that long.
 python train_spiral.py \
-    --env_id KuhnPoker-v1 \
-    --use_llm_obs_wrapper \
-    --eval_env_ids TicTacToe-v0 KuhnPoker-v1 \
-    --eval_use_llm_obs_wrappers False True \
+    --env_ids TicTacToe-v0  KuhnPoker-v1 \
+    --use_llm_obs_wrappers False True \
+    --eval_env_ids TicTacToe-v0  KuhnPoker-v1 SimpleNegotiation-v1 \
+    --eval_use_llm_obs_wrappers False True True \
     --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B \
     --eval_split all \
     --gamma 1 \
-    --gpus 8 \
+    --gpus $GPUS \
     --gradient-checkpointing \
     --num_samples 1 \
-    --rollout_batch_size 64 \
-    --dump_game_state_every 1 \
     --num_envs 1 \
-    --rollout_batch_size_per_device 8 \
-    --pi_buffer_maxlen_per_device 8 \
     --pretrain Qwen/Qwen3-0.6B-Base \
     --enable_prefix_caching \
     --collocate \
@@ -52,7 +58,13 @@ python train_spiral.py \
     --lr_scheduler constant \
     --lr_warmup_ratio 0 \
     --num_ppo_epochs 2 \
-    --train_batch_size 64 \
+    --gradient-checkpointing \
+    --rollout_batch_size $ROLLOUT_BATCH_SIZE \
+    --rollout_batch_size_per_device $ROLLOUT_BATCH_SIZE_PER_DEVICE \
+    --train_batch_size $TRAIN_BATCH_SIZE \
+    --train_batch_size_per_device $TRAIN_BATCH_SIZE_PER_DEVICE \
+    --pi_buffer_maxlen_per_device 8 \
+    --dump_game_state_every 1 \
     --train_batch_size_per_device 1 \
     --beta 0.001 \
     --max_model_len 12800 \

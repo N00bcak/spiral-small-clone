@@ -65,6 +65,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from spiral.agents.random import RandomAgent
+from spiral.agents.hf_local_agent import HFLocalAgentWithTemplate
 from spiral.agents.utils import get_valid_action_parser
 from spiral.components import DummyPromptDataset, MATHOracle, SelfPlayCollector
 from spiral.envs import make_env, make_vec_env
@@ -744,6 +745,9 @@ class SelfPlayActor(PPOActor):
         )
 
         assert self.eval_mode
+        assert self.args.eval_prompt_template in TEMPLATE_FACTORY, (
+            f"Invalid eval prompt template: {self.args.eval_prompt_template}. "
+        )
 
         opponent_id = 1 - player_id
         agents = {
@@ -751,7 +755,7 @@ class SelfPlayActor(PPOActor):
             opponent_id: (
                 RandomAgent(env_id)
                 if opponent_name == "random"
-                else ta.agents.HFLocalAgent(opponent_name.replace("HF:", ""))
+                else HFLocalAgentWithTemplate(opponent_name.replace("HF:", ""), template = TEMPLATE_FACTORY[self.args.eval_prompt_template])
                 if opponent_name.startswith("HF:")
                 else ta.agents.OpenRouterAgent(opponent_name)
             ),
