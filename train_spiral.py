@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Dict, List, Literal, Optional, Tuple
 
+import torch
 import numpy as np
 import textarena as ta
 import torch.distributed as dist
@@ -42,6 +43,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from spiral.agents.random import RandomAgent
+from spiral.agents.hf_local_agent import HFLocalAgentWithTemplate
 from spiral.agents.utils import get_valid_action_parser
 from spiral.components import DummyPromptDataset, MATHOracle, SelfPlayCollector
 from spiral.envs import make_env, make_vec_env
@@ -86,7 +88,7 @@ class SelfPlayArgs(PPOArgs):
     )
     eval_use_llm_obs_wrappers: List[bool] = field(default_factory=lambda: [False, True, True])
     eval_opponent_names: List[str] = field(
-        default_factory=lambda: ["random", "google/gemini-2.0-flash-lite-001"]
+        default_factory=lambda: ["random", "google/gemini-2.0-flash-lite-001", "HF:spiral-rl/Spiral-Qwen3-4B"]
     )
     eval_prompt_template: Literal["qwen3_general", "r1_general"] = "qwen3_general"
 
@@ -718,6 +720,11 @@ class SelfPlayActor(PPOActor):
             opponent_id: (
                 RandomAgent(env_id)
                 if opponent_name == "random"
+                else HFLocalAgentWithTemplate(
+                    opponent_name.replace("HF:", ""), 
+                    template = TEMPLATE_FACTORY[self.args.eval_prompt_template]
+                )
+                if opponent_name.startswith("HF:")
                 else ta.agents.OpenRouterAgent(opponent_name)
             ),
         }
@@ -772,6 +779,12 @@ class SelfPlayActor(PPOActor):
             "opponent_name": opponent_name,
             "model_pid": player_id,
         }
+
+        # Clean up to avoid hogging GPU memory
+        # From an efficiency standpoint this is terrible,
+        # but it allows us to use a different opponent for each evaluation.
+        del agents[opponent_id] 
+        torch.cuda.empty_cache()
 
         return metrics
 
