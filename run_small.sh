@@ -17,52 +17,58 @@ export LD_LIBRARY_PATH=$(python -c "import sysconfig; print(sysconfig.get_config
 export NCCL_CUMEM_ENABLE=0
 export LP_DEBUG=1
 export LP_LOG_LEVEL=DEBUG
+export NCCL_DEBUG=INFO  # helps with debugging
 
 # Notes ==========
 # Setting `--save_steps 16` to save checkpoints every 16 policy iteration steps.
 # Set `--eval_opponent_names google/gemini-2.0-flash-lite-001` if you have OpenRouter access.
-
+# The public repo does NOT support training on multiple game environments.
+# Ensure rollout_batch_size = rollout_batch_size_per_device * gpus.
+# Beta is the KL Divergence coefficient, set to 0 for no KL penalty.
+# Max length should be set quite generously; it's rare for models to generate that long.
 python train_spiral.py \
     --env_id KuhnPoker-v1 \
     --use_llm_obs_wrapper \
     --eval_env_ids TicTacToe-v0 KuhnPoker-v1 \
     --eval_use_llm_obs_wrappers False True \
+    --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B \
     --eval_split all \
     --gamma 1 \
     --gpus 8 \
     --gradient-checkpointing \
     --num_samples 1 \
-    --rollout_batch_size 128 \
+    --rollout_batch_size 64 \
     --dump_game_state_every 1 \
     --num_envs 1 \
-    --rollout_batch_size_per_device 16 \
-    --pi_buffer_maxlen_per_device 16 \
-    --pretrain HuggingFaceTB/SmolLM2-135M \
+    --rollout_batch_size_per_device 8 \
+    --pi_buffer_maxlen_per_device 8 \
+    --pretrain Qwen/Qwen3-0.6B-Base \
     --enable_prefix_caching \
     --collocate \
     --vllm_sleep \
-    --vllm_gpu_ratio 0.45 \
+    --vllm_gpu_ratio 0.2 \
     --rnd-seed \
     --learning_rate 0.000001 \
     --lr_scheduler constant \
     --lr_warmup_ratio 0 \
     --num_ppo_epochs 2 \
-    --train_batch_size 128 \
+    --train_batch_size 64 \
     --train_batch_size_per_device 1 \
-    --beta 0 \
+    --beta 0.001 \
     --max_model_len 12800 \
     --generate_max_length 4096 \
     --max_context_length 32768 \
     --temperature 1.0 \
     --top_p 1 \
-    --eval_steps 16 \
-    --save_steps -1 \
-    --eval_games 16 \
+    --eval_steps 32 \
+    --save_steps 32 \
+    --eval_games 8 \
     --eval_temperature 0.6 \
     --eval_top_p 0.95 \
     --eval_generate_max_length 4096 \
-    --max_train 51200 \
-    --max_save_num 30 \
+    --max_train 25600 \
+    --save_path ~/nfs/spiral-small-clone/spiral-small-self-play-pilot \
+    --max_save_num 8 \
     --use-wb \
-    --wb-run-name spiral-qwen3-4b-base-kp-4k-self-play \
+    --wb-run-name spiral-small-self-play-pilot \
     --wb_project spiral-small-clone

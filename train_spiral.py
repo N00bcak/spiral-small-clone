@@ -12,7 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Self-Play Reinforcement Learning Pipeline using OAT and TextArena."""
+"""
+
+Self-Play Reinforcement Learning Pipeline using OAT and TextArena.
+
+
+Training Loop Summary:
+- Learner orchestrates the entire process
+    - Collecting game trajectories (via the collector)
+    - Compute advantages (with any computation)
+    - Populate buffer with trajectories
+    - Run policy gradient updates*
+    - Occasionally evaluate the policy (against fixed opponents)
+
+- Collector orchestrates actors
+    - Ultimately compiles all the games played and 
+        returns the serialized trajectories
+
+- Actor is quite simple.
+    - Literally defines how to play games.
+
+* Now it says PPO. And that is true. But the advantage
+is by default computed as Dr. GRPO (I guess a sensible choice
+because LLMs are pretty huge)
+"""
 
 import copy
 import functools
@@ -61,7 +84,7 @@ INVALID_ACTION = "[｜INVALID_ACTION｜]"
 
 
 @dataclass
-class SelfPlayArgs(PPOArgs): # Despite being called PPOArgs, the default critic is actually à la Dr. GRPO.
+class SelfPlayArgs(PPOArgs):
     # Environment settings
     env_ids: List[str] = field(default_factory=lambda: ["KuhnPoker-v1"])
     use_llm_obs_wrappers: List[bool] = field(
@@ -76,10 +99,6 @@ class SelfPlayArgs(PPOArgs): # Despite being called PPOArgs, the default critic 
     filter_zero_adv: bool = (
         True  # Make gradient less noisy by filtering zero-gradient trajectories
     )
-
-    '''
-    SPIRAL uses per-player running average (EMA) as the baseline for estimation.
-    '''
     use_role_baseline: bool = True  # Use role baseline for reward shaping
     role_baseline_ema_gamma: float = 0.95
 
@@ -90,7 +109,7 @@ class SelfPlayArgs(PPOArgs): # Despite being called PPOArgs, the default critic 
     )
     eval_use_llm_obs_wrappers: List[bool] = field(default_factory=lambda: [False, True, True])
     eval_opponent_names: List[str] = field(
-        default_factory=lambda: ["random", "google/gemini-2.0-flash-lite-001"]
+        default_factory=lambda: ["random", "google/gemini-2.0-flash-lite-001", "HF:spiral-rl/Spiral-Qwen3-4B"]
     )
     eval_prompt_template: Literal["qwen3_general", "r1_general"] = "qwen3_general"
 
@@ -169,6 +188,7 @@ class SelfPlayActor(PPOActor):
         )
 
         self.step_count = 0
+        # (040825) Does this mean the model sees the exact same number of games as player 0 AND player 1?
         self.online_model_player = actor_id % 2
         if self.args.fixed_opponent not in ["", "random"]:
             self.open_router_opponent = ta.agents.OpenRouterAgent(
@@ -188,6 +208,7 @@ class SelfPlayActor(PPOActor):
             self.args.prompt_template_overrides
         )
 
+    # (040825) This is analogous to collecting rollouts in a normal RL loop.
     def step(
         self, prompts=None, formatted_prompts=None, references=None
     ) -> List[TrajectoryData]:
@@ -245,6 +266,10 @@ class SelfPlayActor(PPOActor):
         handle = self.ipc_client.serialize_ipc(all_trajectories)
         return handle
 
+    # (040825)
+    # Seems to play exactly ONE game with two players.
+    # Depending on whether the fixed opponent is set, either the opponent is a designated LLM,
+    # or the opponent is the player itself.
     def play_game_vectorized(
         self,
         env_id: str,
@@ -287,13 +312,17 @@ class SelfPlayActor(PPOActor):
                     vec_player_id.append(None)
                     vec_observation.append(None)
 
+            # (040825) Not sure why we enforce same player_id for all envs.
             _mean_pid = np.mean([x for x in vec_player_id if x is not None])
             assert _mean_pid == 0 or _mean_pid == 1, "vec_env player_id not consistent"
             _curr_pid = vec_player_id[0]
 
             # --- [BEGIN] Fixed Opponent Logic Init ---
-            agent_act = self.agent_act
+            agent_act = self.agent_act # Uses the online agent's policy.
             _fixed_opponent = ""
+
+            # (040825) Will use the fixed opponent if specified, and if
+            # current player is online model's opponent.
             if self.args.fixed_opponent and _curr_pid == 1 - self.online_model_player:
                 logging.info(
                     f"player{_curr_pid} using fixed opponent={self.args.fixed_opponent}"
@@ -348,7 +377,7 @@ class SelfPlayActor(PPOActor):
                     if action == INVALID_ACTION:
                         done = True
                     vec_done[i] = done
-                    if done and action == INVALID_ACTION:
+                    if done and action == INVALID_ACTION: # (040825) SEVERE penalty for illegal moves.
                         rewards = {0: 0.5, 1: 0.5}
                         rewards[player_id] = -1.5
                         vec_rewards[i] = rewards
@@ -362,7 +391,7 @@ class SelfPlayActor(PPOActor):
                             f"Game truncated after {game_state.turn_count} turns"
                         )
                         # Set draw rewards
-                        rewards = {0: 0, 1: 0}
+                        rewards = {0: 0, 1: 0} # (040825) Why truncate? Should this not be infinite-horizon?
                         vec_done[i] = True
                         vec_rewards[i] = rewards
 
@@ -722,6 +751,8 @@ class SelfPlayActor(PPOActor):
             opponent_id: (
                 RandomAgent(env_id)
                 if opponent_name == "random"
+                else ta.agents.HFLocalAgent(opponent_name.replace("HF:", ""))
+                if opponent_name.startswith("HF:")
                 else ta.agents.OpenRouterAgent(opponent_name)
             ),
         }
