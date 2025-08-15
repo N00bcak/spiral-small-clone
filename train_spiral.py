@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Dict, List, Literal, Optional, Tuple
 
+import torch
 import numpy as np
 import textarena as ta
 import torch.distributed as dist
@@ -811,6 +812,12 @@ class SelfPlayActor(PPOActor):
             "opponent_name": opponent_name,
             "model_pid": player_id,
         }
+
+        # Clean up to avoid hogging GPU memory
+        # From an efficiency standpoint this is terrible,
+        # but it allows us to use a different opponent for each evaluation.
+        del agents[opponent_id] 
+        torch.cuda.empty_cache()
 
         return metrics
 
