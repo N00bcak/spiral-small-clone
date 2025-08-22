@@ -160,6 +160,19 @@ class SelfPlayActor(PPOActor):
         return overrides
 
     def init(self, actor_id, save_path):
+
+        # monkeypatch: If we are using local opponent, then freeing up the local opponent makes more sense
+        # since it goes to sleep more often.
+        
+        # Using local model
+        if any([name.startswith("HF:") for name in self.args.eval_opponent_names]):
+            # Check we are only using one model. In the future we should try allowing
+            # for more?
+            assert len(set(name for name in self.args.eval_opponent_names if name.startswith("HF:"))) == 1, \
+                "Currently only one HF model is supported at a time."
+
+            self.vllm_args["enable_sleep_mode"] = False
+
         super().init(actor_id, save_path)
         self.game_state_save_path = os.path.join(self.save_path, "game_state")
         if actor_id == 0:
@@ -209,6 +222,28 @@ class SelfPlayActor(PPOActor):
         self._template_overrides = self._parse_template_overrides(
             self.args.prompt_template_overrides
         )
+
+        # Using local model
+        if any([name.startswith("HF:") for name in self.args.eval_opponent_names]):
+
+            self.vllm_args["enable_sleep_mode"] = True
+
+            _wait_time = 5
+            for _ in range(10):
+                # Retry in case network error when accessing HF.
+                try:
+                    self.opponent_llm = vllm.LLM(**self.vllm_args)
+                    break
+                except Exception as e:
+                    # In case of timeout.
+                    time.sleep(_wait_time)
+                    _wait_time *= 1.2
+                    logging.warning(f"{e}")
+                    logging.warning("Re-trying...")
+            else:
+                raise RuntimeError("vllm cannot load the opponent")
+
+            self.opponent_tokenizer = self.opponent_llm.get_tokenizer()
 
     # (040825) This is analogous to collecting rollouts in a normal RL loop.
     def step(
@@ -464,6 +499,83 @@ class SelfPlayActor(PPOActor):
                     "response": f"This action is taken by a fixed agent: {opponent_type}",
                     "response_ids": [],
                     "response_is_truncated": True,
+                }
+            )
+        return clean_actions, extras
+    
+    def local_opponent_generate(self, 
+        prompts: List[str],
+        sampling_params: vllm.SamplingParams,
+    ):
+        self.generate_mode = True
+        if isinstance(prompts[0], str):
+            # Inference with text input
+            if self.opponent_tokenizer.bos_token:
+                # removeprefix bos_token because vllm will add it.
+                prompts = [p.removeprefix(self.opponent_tokenizer.bos_token) for p in prompts]
+            outputs = self.opponent_llm.generate(
+                prompts, sampling_params=sampling_params, use_tqdm=False
+            )
+        else:
+            # Inference with token input
+            outputs = self.opponent_llm.generate(
+                prompt_token_ids=prompts,
+                sampling_params=sampling_params,
+                use_tqdm=False,
+            )
+
+        if self.opponent_tokenizer.bos_token:
+            # make sure vllm added bos_token.
+            assert self.opponent_tokenizer.bos_token_id in outputs[0].prompt_token_ids
+
+        self.generate_mode = False
+        return outputs
+
+                                
+
+    def local_opponent_act(self, vec_observation: List[str], env_id: str) -> Tuple[str, dict]:
+        """
+        Handles behavior for local opponents.
+        """
+        assert self.eval_mode, "Umm. Not evaluating?"
+        clean_actions = []
+        extras = []
+        for observation in vec_observation:
+            if observation is None:
+                clean_actions.append(None)
+                extras.append(None)
+                continue
+
+            # Get template for this specific environment
+            template_name = self._template_overrides.get(
+                env_id, self.args.prompt_template
+            )
+
+            formatted_observation = TEMPLATE_FACTORY[template_name](
+                observation, system_prompt=None
+            )
+            sampling_params = self.eval_sampling_params
+
+            outputs = self.local_opponent_generate([formatted_observation], sampling_params)
+            raw_action = outputs[0].outputs[0].text
+            prompt_token_ids = outputs[0].prompt_token_ids
+            token_ids = outputs[0].outputs[0].token_ids
+
+            if env_id in ["DontSayIt-v0", "SimpleNegotiation-v1"]:  # DontSayIt-v0 don't have fixed action space
+                clean_action = self.extract_chat_action(raw_action)
+            else:
+                action_space = get_valid_action_parser(env_id)(observation)
+                clean_action = self.extract_action(raw_action, action_space)
+            response_is_truncated = outputs[0].outputs[0].finish_reason == "length"
+
+            clean_actions.append(clean_action)
+            extras.append(
+                {
+                    "formatted_observation": formatted_observation,
+                    "prompt_ids": prompt_token_ids,
+                    "response": raw_action,
+                    "response_ids": token_ids,
+                    "response_is_truncated": response_is_truncated,
                 }
             )
         return clean_actions, extras
@@ -756,7 +868,13 @@ class SelfPlayActor(PPOActor):
             opponent_id: (
                 RandomAgent(env_id)
                 if opponent_name == "random"
-                else HFLocalAgentWithTemplate(opponent_name.replace("HF:", ""), template = TEMPLATE_FACTORY[self.args.eval_prompt_template])
+                # else HFLocalAgentWithTemplate(
+                #     opponent_name.replace("HF:", ""), 
+                #     template = TEMPLATE_FACTORY[self.args.eval_prompt_template], 
+                #     device = self.llm.device, 
+                #     quantize = True
+                # )
+                else lambda obs: self.local_opponent_act([obs], env_id)[0][0]
                 if opponent_name.startswith("HF:")
                 else ta.agents.OpenRouterAgent(opponent_name)
             ),
@@ -816,7 +934,9 @@ class SelfPlayActor(PPOActor):
         # Clean up to avoid hogging GPU memory
         # From an efficiency standpoint this is terrible,
         # but it allows us to use a different opponent for each evaluation.
+        # opp_device = agents[opponent_id].model.device
         del agents[opponent_id] 
+        # with torch.cuda.device(opp_device):
         torch.cuda.empty_cache()
 
         return metrics

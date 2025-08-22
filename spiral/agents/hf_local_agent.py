@@ -7,7 +7,7 @@ class HFLocalAgentWithTemplate(HFLocalAgent):
     extends the functionality to allow for OUR style of templates.
 
     Pre-empts 'distributional shift' issues on HF agents to-be-evaluated,
-    especially other models  post-trained via SPIRAL.
+    especially other models post-trained via SPIRAL.
     """
     def __init__(self, model_name, template: Callable[[str, Optional[str]], str], system_prompt = "", *args, **kwargs):
         super().__init__(model_name, *args, **kwargs)
@@ -31,3 +31,8 @@ class HFLocalAgentWithTemplate(HFLocalAgent):
             return action
         except Exception as e:
             return f"An error occurred: {e}"
+    
+# class LocalAgent(Agent):
+#     '''
+#     Uses vLLM 
+#     '''
