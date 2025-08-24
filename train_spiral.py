@@ -171,6 +171,7 @@ class SelfPlayActor(PPOActor):
             assert len(set(name for name in self.args.eval_opponent_names if name.startswith("HF:"))) == 1, \
                 "Currently only one HF model is supported at a time."
 
+            self.opp_vllm_args = copy.deepcopy(self.vllm_args)
             self.vllm_args["enable_sleep_mode"] = False
 
         super().init(actor_id, save_path)
@@ -226,13 +227,11 @@ class SelfPlayActor(PPOActor):
         # Using local model
         if any([name.startswith("HF:") for name in self.args.eval_opponent_names]):
 
-            self.vllm_args["enable_sleep_mode"] = True
-
             _wait_time = 5
             for _ in range(10):
                 # Retry in case network error when accessing HF.
                 try:
-                    self.opponent_llm = vllm.LLM(**self.vllm_args)
+                    self.opponent_llm = vllm.LLM(**self.opp_vllm_args)
                     break
                 except Exception as e:
                     # In case of timeout.
@@ -580,6 +579,24 @@ class SelfPlayActor(PPOActor):
             )
         return clean_actions, extras
 
+    def sleep(self, level=1):
+        """Sleep & Wake Up.
+        sleep & wake_up are used together to offload model weights & kv cache to CPUs then onload.
+        They are particularly useful when actors & learners collocate.
+        """
+        if self.vllm_args["enable_sleep_mode"]:
+            self.llm.sleep(level=level)
+
+        if self.opp_vllm_args["enable_sleep_mode"]:
+            self.opponent_llm.sleep(level=level)
+
+    def wake_up(self):
+        if self.vllm_args["enable_sleep_mode"]:
+            self.llm.wake_up()
+
+        if self.opp_vllm_args["enable_sleep_mode"]:
+            self.opponent_llm.wake_up()
+
     def agent_act(self, vec_observation: List[str], env_id: str) -> Tuple[str, dict]:
         """Use the current LLM as a policy to act.
 
@@ -874,9 +891,11 @@ class SelfPlayActor(PPOActor):
                 #     device = self.llm.device, 
                 #     quantize = True
                 # )
-                else lambda obs: self.local_opponent_act([obs], env_id)[0][0]
-                if opponent_name.startswith("HF:")
-                else ta.agents.OpenRouterAgent(opponent_name)
+                else (
+                    lambda obs: self.local_opponent_act([obs], env_id)[0][0] 
+                    if opponent_name.startswith("HF:")
+                    else ta.agents.OpenRouterAgent(opponent_name)
+                )
             ),
         }
 

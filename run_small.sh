@@ -17,13 +17,13 @@ export LD_LIBRARY_PATH=$(python -c "import sysconfig; print(sysconfig.get_config
 export NCCL_CUMEM_ENABLE=0
 export LP_DEBUG=1
 export LP_LOG_LEVEL=DEBUG
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,1,2,3,5,6,7,8 # GPU 4 is the 4090.
-# export CUDA_VISIBLE_DEVICES=0
+# export CUDA_DEVICE_ORDER=PCI_BUS_ID
+# export CUDA_VISIBLE_DEVICES=0,1,2,3,5,6,7,8 # GPU 4 is the 4090.
+export CUDA_VISIBLE_DEVICES=0
 export NCCL_DEBUG=INFO  # helps with debugging
 
 # Abstracted batch sizes
-GPUS=8
+GPUS=1
 ROLLOUT_BATCH_SIZE_PER_DEVICE=16
 TRAIN_BATCH_SIZE_PER_DEVICE=1
 ROLLOUT_BATCH_SIZE=$((GPUS * ROLLOUT_BATCH_SIZE_PER_DEVICE))
@@ -36,12 +36,13 @@ TRAIN_BATCH_SIZE=$((GPUS * ROLLOUT_BATCH_SIZE_PER_DEVICE))
 # Ensure rollout_batch_size = rollout_batch_size_per_device * gpus.
 # Beta is the KL Divergence coefficient, set to 0 for no KL penalty.
 # Max length should be set quite generously; it's rare for models to generate that long.
+#HF:spiral-rl/Spiral-Qwen3-4B \
 python train_spiral.py \
-    --env_ids KuhnPoker-v1 \
-    --use_llm_obs_wrappers True \
-    --eval_env_ids KuhnPoker-v1 \
-    --eval_use_llm_obs_wrappers True \
-    --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B \
+    --env_ids TicTacToe-v0 KuhnPoker-v1 SimpleNegotiation-v1 \
+    --use_llm_obs_wrappers False True True \
+    --eval_env_ids TicTacToe-v0 KuhnPoker-v1 SimpleNegotiation-v1 \
+    --eval_use_llm_obs_wrappers False True True \
+    --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B \
     --eval_split all \
     --gamma 1 \
     --gpus $GPUS \
@@ -65,7 +66,7 @@ python train_spiral.py \
     --train_batch_size $TRAIN_BATCH_SIZE \
     --dump_game_state_every 1 \
     --train_batch_size_per_device 1 \
-    --beta 0.001 \
+    --beta 0 \
     --max_model_len 12800 \
     --generate_max_length 4096 \
     --max_context_length 32768 \
