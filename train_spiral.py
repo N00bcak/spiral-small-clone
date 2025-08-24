@@ -168,11 +168,16 @@ class SelfPlayActor(PPOActor):
         if any([name.startswith("HF:") for name in self.args.eval_opponent_names]):
             # Check we are only using one model. In the future we should try allowing
             # for more?
+
             assert len(set(name for name in self.args.eval_opponent_names if name.startswith("HF:"))) == 1, \
                 "Currently only one HF model is supported at a time."
+            
+            self.has_local_opponent = True
 
             self.opp_vllm_args = copy.deepcopy(self.vllm_args)
             self.vllm_args["enable_sleep_mode"] = False
+        else: 
+            self.has_local_opponent = False
 
         super().init(actor_id, save_path)
         self.game_state_save_path = os.path.join(self.save_path, "game_state")
@@ -225,7 +230,7 @@ class SelfPlayActor(PPOActor):
         )
 
         # Using local model
-        if any([name.startswith("HF:") for name in self.args.eval_opponent_names]):
+        if self.has_local_opponent:
 
             _wait_time = 5
             for _ in range(10):
@@ -587,14 +592,14 @@ class SelfPlayActor(PPOActor):
         if self.vllm_args["enable_sleep_mode"]:
             self.llm.sleep(level=level)
 
-        if self.opp_vllm_args["enable_sleep_mode"]:
+        if self.has_local_opponent and self.opp_vllm_args["enable_sleep_mode"]:
             self.opponent_llm.sleep(level=level)
 
     def wake_up(self):
         if self.vllm_args["enable_sleep_mode"]:
             self.llm.wake_up()
 
-        if self.opp_vllm_args["enable_sleep_mode"]:
+        if self.has_local_opponent and self.opp_vllm_args["enable_sleep_mode"]:
             self.opponent_llm.wake_up()
 
     def agent_act(self, vec_observation: List[str], env_id: str) -> Tuple[str, dict]:

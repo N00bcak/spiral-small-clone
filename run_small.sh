@@ -18,12 +18,12 @@ export NCCL_CUMEM_ENABLE=0
 export LP_DEBUG=1
 export LP_LOG_LEVEL=DEBUG
 # export CUDA_DEVICE_ORDER=PCI_BUS_ID
-# export CUDA_VISIBLE_DEVICES=0,1,2,3,5,6,7,8 # GPU 4 is the 4090.
-export CUDA_VISIBLE_DEVICES=0
+# export CUDA_VISIBLE_DEVICES=0,1,2,3 # GPU 4 is the 4090.
+# export CUDA_VISIBLE_DEVICES=0
 export NCCL_DEBUG=INFO  # helps with debugging
 
 # Abstracted batch sizes
-GPUS=1
+GPUS=8
 ROLLOUT_BATCH_SIZE_PER_DEVICE=16
 TRAIN_BATCH_SIZE_PER_DEVICE=1
 ROLLOUT_BATCH_SIZE=$((GPUS * ROLLOUT_BATCH_SIZE_PER_DEVICE))
@@ -37,13 +37,14 @@ TRAIN_BATCH_SIZE=$((GPUS * ROLLOUT_BATCH_SIZE_PER_DEVICE))
 # Beta is the KL Divergence coefficient, set to 0 for no KL penalty.
 # Max length should be set quite generously; it's rare for models to generate that long.
 #HF:spiral-rl/Spiral-Qwen3-4B \
+# --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B \
 python train_spiral.py \
     --env_ids TicTacToe-v0 KuhnPoker-v1 SimpleNegotiation-v1 \
     --use_llm_obs_wrappers False True True \
     --eval_env_ids TicTacToe-v0 KuhnPoker-v1 SimpleNegotiation-v1 \
     --eval_use_llm_obs_wrappers False True True \
-    --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B \
     --eval_split all \
+    --eval_opponent_names HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B HF:spiral-rl/Spiral-Qwen3-4B \
     --gamma 1 \
     --gpus $GPUS \
     --gradient-checkpointing \
@@ -77,10 +78,11 @@ python train_spiral.py \
     --eval_games 8 \
     --eval_temperature 0.6 \
     --eval_top_p 0.95 \
-    --eval_generate_max_length 3072 \
+    --eval_generate_max_length 4096 \
     --max_train 25600 \
     --save_path ~/nfs/spiral-small-clone/spiral-small-self-play-pilot \
     --max_save_num 8 \
     --use-wb \
     --wb-run-name spiral-small-self-play-pilot \
-    --wb_project spiral-small-clone
+    --wb_project spiral-small-clone \
+    --debug
