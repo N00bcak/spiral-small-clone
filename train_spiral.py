@@ -1186,15 +1186,17 @@ class SelfPlayLearner(PPOLearner):
         game_metrics_dict = self.strategy.broadcast(game_metrics_dict)
 
         if self.args.eval_dump_game_states:
+
+            eval_results_path = os.path.join(
+                self.save_path, "eval_results",
+                f"{steps}_eval_game.json",
+            )
+
+            eval_results_path.parent.mkdir(parents=True, exist_ok=True)
+
             json.dump(
                 game_histories,
-                open(
-                    os.path.join(
-                        self.save_path, "eval_results",
-                        f"eval_game_step{self.step_count}.json",
-                    ),
-                    "w",
-                ),
+                open(eval_results_path, "w"),
                 indent=4,
             )
 
