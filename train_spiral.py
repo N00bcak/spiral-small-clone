@@ -48,7 +48,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Callable
 
 import torch
 import numpy as np
@@ -114,6 +114,10 @@ class SelfPlayArgs(PPOArgs):
         default_factory=lambda: ["random", "google/gemini-2.0-flash-lite-001", "HF:spiral-rl/Spiral-Qwen3-4B"]
     )
     eval_prompt_template: Literal["qwen3_general", "r1_general"] = "qwen3_general"
+    # Whether to dump game data during evaluation.
+    # Check if opponents (with a possibly different sampling temperature)
+    # are making reasonable moves.
+    eval_dump_game_states: bool = False 
 
     # Dump all game data.
     dump_game_state_every: int = 1
@@ -885,10 +889,36 @@ class SelfPlayActor(PPOActor):
         )
 
         opponent_id = 1 - player_id
+
+        def agent_closure(agent: Callable[[str], str], response_template = None):
+            '''
+            Enforces the OUTPUT signature 
+            [str] -> Tuple[str, Dict[str, Any]]
+
+            which is used by `SelfPlayActor.agent_act` and `SelfPlayActor.local_opponent_act`
+            '''
+
+            def _close(obs: str) -> Tuple[str, Dict[str, Any]]:
+
+                action = agent(obs)
+                return (
+                    [action], 
+                    [{
+                        'formatted_observation': '', 
+                        'response': (
+                            response_template(action) 
+                            if response_template is not None 
+                            else f"No action template specified by {opponent_name}. Took action {action}."
+                        )
+                    }]
+                )
+        
+            return _close
+
         agents = {
-            player_id: lambda obs: self.agent_act([obs], env_id)[0][0],
+            player_id: lambda obs: self.agent_act([obs], env_id),
             opponent_id: (
-                RandomAgent(env_id)
+                agent_closure(RandomAgent(env_id))
                 if opponent_name == "random"
                 # else HFLocalAgentWithTemplate(
                 #     opponent_name.replace("HF:", ""), 
@@ -897,9 +927,9 @@ class SelfPlayActor(PPOActor):
                 #     quantize = True
                 # )
                 else (
-                    lambda obs: self.local_opponent_act([obs], env_id)[0][0] 
+                    lambda obs: self.local_opponent_act([obs], env_id)
                     if opponent_name.startswith("HF:")
-                    else ta.agents.OpenRouterAgent(opponent_name)
+                    else agent_closure(ta.agents.OpenRouterAgent(opponent_name))
                 )
             ),
         }
@@ -914,9 +944,23 @@ class SelfPlayActor(PPOActor):
         turn_counter = 0
         done = False
         invalid_rewards = None
+        game_history = {}
         while not done:
             pid, observation = env.get_observation()
-            action = agents[pid](observation)
+            # Here we expect one environment anyway so we can just take the first action
+            action_lst, extras = agents[pid](observation)
+            action = action_lst[0] if action_lst else INVALID_ACTION
+            extra = extras[0] if extras else {}
+            # assert False, helpme
+            # action_lst, extras = helpme
+
+            game_history[f"player_{pid}_{turn_counter}"] = {
+                "observation": observation,
+                "formatted_observation": extra.get("formatted_observation", ""),
+                "response": extra.get("response", []),
+                "action": action
+            }
+
             done, info = env.step(action)
             if action == INVALID_ACTION:
                 done = True
@@ -955,6 +999,8 @@ class SelfPlayActor(PPOActor):
             "model_pid": player_id,
         }
 
+        game_history.update(metrics)
+
         # Clean up to avoid hogging GPU memory
         # From an efficiency standpoint this is terrible,
         # but it allows us to use a different opponent for each evaluation.
@@ -963,7 +1009,7 @@ class SelfPlayActor(PPOActor):
         # with torch.cuda.device(opp_device):
         torch.cuda.empty_cache()
 
-        return metrics
+        return metrics, game_history
 
 
 """
@@ -1114,6 +1160,7 @@ class SelfPlayLearner(PPOLearner):
 
             # Run evaluation
             futs = []
+            game_histories = []
             progress_bar = tqdm(range(len(eval_runs_list)), desc="Evaluating")
             random.shuffle(eval_runs_list)
 
@@ -1124,8 +1171,9 @@ class SelfPlayLearner(PPOLearner):
                 # Process results in batches
                 if len(futs) == len(self.actors) or i == len(eval_runs_list) - 1:
                     for fut in futs:
-                        result = fut.result()
+                        result, game_history = fut.result()
                         game_metrics.add_result(result)
+                        game_histories.append(game_history)
                         progress_bar.update(1)
 
                     futs.clear()
@@ -1136,6 +1184,20 @@ class SelfPlayLearner(PPOLearner):
         game_metrics_dict = game_metrics.to_dict()
         game_metrics_dict["eval/game_eval_time"] = time.time() - t0
         game_metrics_dict = self.strategy.broadcast(game_metrics_dict)
+
+        if self.args.eval_dump_game_states:
+            json.dump(
+                game_histories,
+                open(
+                    os.path.join(
+                        self.save_path, "eval_results",
+                        f"eval_game_step{self.step_count}.json",
+                    ),
+                    "w",
+                ),
+                indent=4,
+            )
+
 
         self._post_evaluate()
 
@@ -1230,7 +1292,7 @@ if __name__ == "__main__":
 
     # Customization
     args.algo = "PPO"
-    args.eval_batch_size = 32
+    # args.eval_batch_size = 32
 
     # CRITICAL: Disable oracle and dataset loading
     args.oracle = ""  # Empty string for no external oracle
