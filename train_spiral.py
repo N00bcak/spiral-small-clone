@@ -1187,12 +1187,16 @@ class SelfPlayLearner(PPOLearner):
 
         if self.args.eval_dump_game_states:
 
-            eval_results_path = os.path.join(
+            eval_results_dir = os.path.join(
                 self.save_path, "eval_results",
-                f"{steps}_eval_game.json",
             )
 
-            eval_results_path.parent.mkdir(parents=True, exist_ok=True)
+            os.makedirs(eval_results_dir, exist_ok = True)
+
+            eval_results_path = os.path.join(
+                eval_results_dir,
+                f"{steps}_eval_game.json",
+            )
 
             json.dump(
                 game_histories,
