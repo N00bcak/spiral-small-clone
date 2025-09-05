@@ -111,13 +111,16 @@ class SelfPlayArgs(PPOArgs):
     )
     eval_use_llm_obs_wrappers: List[bool] = field(default_factory=lambda: [False, True, True])
     eval_opponent_names: List[str] = field(
-        default_factory=lambda: ["random", "google/gemini-2.0-flash-lite-001", "HF:spiral-rl/Spiral-Qwen3-4B"]
+        default_factory=lambda: ["random", "self", "google/gemini-2.0-flash-lite-001", "HF:spiral-rl/Spiral-Qwen3-4B"]
     )
     eval_prompt_template: Literal["qwen3_general", "r1_general"] = "qwen3_general"
+    eval_opponent_prompt_template: Literal["qwen3_general", "r1_general"] = "qwen3_general"
     # Whether to dump game data during evaluation.
     # Check if opponents (with a possibly different sampling temperature)
     # are making reasonable moves.
-    eval_dump_game_states: bool = False 
+    eval_dump_game_states: bool = True 
+
+    opp_temperature: float = 1.0
 
     # Dump all game data.
     dump_game_state_every: int = 1
@@ -205,6 +208,15 @@ class SelfPlayActor(PPOActor):
 
         self.eval_sampling_params = vllm.SamplingParams(
             temperature=args.eval_temperature,
+            top_p=args.eval_top_p,
+            top_k=args.eval_top_k,
+            max_tokens=args.eval_generate_max_length,
+            n=1,  # Override to only generate 1 response per prompt for self-play
+            logprobs=True,
+        )
+
+        self.opp_sampling_params = vllm.SamplingParams(
+            temperature=args.opp_temperature,
             top_p=args.eval_top_p,
             top_k=args.eval_top_k,
             max_tokens=args.eval_generate_max_length,
@@ -556,13 +568,13 @@ class SelfPlayActor(PPOActor):
 
             # Get template for this specific environment
             template_name = self._template_overrides.get(
-                env_id, self.args.prompt_template
+                env_id, self.args.eval_opponent_prompt_template
             )
 
             formatted_observation = TEMPLATE_FACTORY[template_name](
                 observation, system_prompt=None
             )
-            sampling_params = self.eval_sampling_params
+            sampling_params = self.opp_sampling_params
 
             outputs = self.local_opponent_generate([formatted_observation], sampling_params)
             raw_action = outputs[0].outputs[0].text
@@ -918,18 +930,18 @@ class SelfPlayActor(PPOActor):
         agents = {
             player_id: lambda obs: self.agent_act([obs], env_id),
             opponent_id: (
-                agent_closure(RandomAgent(env_id))
+                agent_closure(
+                    RandomAgent(env_id), 
+                    response_template = lambda action: f"This action is taken by a random agent. Took action {action}."
+                )
                 if opponent_name == "random"
-                # else HFLocalAgentWithTemplate(
-                #     opponent_name.replace("HF:", ""), 
-                #     template = TEMPLATE_FACTORY[self.args.eval_prompt_template], 
-                #     device = self.llm.device, 
-                #     quantize = True
-                # )
-                else (
-                    lambda obs: self.local_opponent_act([obs], env_id)
-                    if opponent_name.startswith("HF:")
-                    else agent_closure(ta.agents.OpenRouterAgent(opponent_name))
+                else lambda obs: self.agent_act([obs], env_id)
+                if opponent_name == "self"
+                else lambda obs: self.local_opponent_act([obs], env_id)
+                if opponent_name.startswith("HF:")
+                else agent_closure(
+                    ta.agents.OpenRouterAgent(opponent_name), 
+                    response_template = lambda action: f"This action is taken by {opponent_name}. Took action {action}."
                 )
             ),
         }
@@ -949,15 +961,19 @@ class SelfPlayActor(PPOActor):
             pid, observation = env.get_observation()
             # Here we expect one environment anyway so we can just take the first action
             action_lst, extras = agents[pid](observation)
+            # assert False, f"DEBUGGING\n{action_lst}\n{extras}"
             action = action_lst[0] if action_lst else INVALID_ACTION
             extra = extras[0] if extras else {}
             # assert False, helpme
             # action_lst, extras = helpme
 
-            game_history[f"player_{pid}_{turn_counter}"] = {
+            # completion = extra.get("response", "")
+            # response = completion[len(observation):]
+
+            game_history[f"{'SelfPlayActor' if pid == player_id else opponent_name}_player_{pid}_turn_{turn_counter}"] = {
                 "observation": observation,
                 "formatted_observation": extra.get("formatted_observation", ""),
-                "response": extra.get("response", []),
+                "response": extra.get("response", ""),
                 "action": action
             }
 
@@ -992,11 +1008,12 @@ class SelfPlayActor(PPOActor):
             "invalid_move": invalid_move,
             "reason": info.get("reason", ""),
             "num_turns": turn_counter,
-            "opponent_reward": rewards[opponent_id],
             "model_reward": rewards[player_id],
+            "opponent_reward": rewards[opponent_id],
             "env_id": env_id,
             "opponent_name": opponent_name,
             "model_pid": player_id,
+            "opponent_pid": opponent_id,
         }
 
         game_history.update(metrics)
@@ -1180,29 +1197,30 @@ class SelfPlayLearner(PPOLearner):
 
             game_metrics.aggregate()
 
+            if self.args.eval_dump_game_states:
+
+                eval_results_dir = os.path.join(
+                    self.save_path, "eval_results",
+                )
+
+                os.makedirs(eval_results_dir, exist_ok = True)
+
+                eval_results_path = os.path.join(
+                    eval_results_dir,
+                    f"{steps}_eval_game.json",
+                )
+
+                json.dump(
+                    game_histories,
+                    open(eval_results_path, "w"),
+                    indent=4,
+                )
+
+
         dist.barrier()
         game_metrics_dict = game_metrics.to_dict()
         game_metrics_dict["eval/game_eval_time"] = time.time() - t0
         game_metrics_dict = self.strategy.broadcast(game_metrics_dict)
-
-        if self.args.eval_dump_game_states:
-
-            eval_results_dir = os.path.join(
-                self.save_path, "eval_results",
-            )
-
-            os.makedirs(eval_results_dir, exist_ok = True)
-
-            eval_results_path = os.path.join(
-                eval_results_dir,
-                f"{steps}_eval_game.json",
-            )
-
-            json.dump(
-                game_histories,
-                open(eval_results_path, "w"),
-                indent=4,
-            )
 
 
         self._post_evaluate()
